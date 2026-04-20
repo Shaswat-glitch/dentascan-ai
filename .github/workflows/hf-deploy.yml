@@ -1,10 +1,12 @@
 name: Sync Backend to Hugging Face Space
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
       - 'backend/**'
+      - '.github/workflows/**'
 
 jobs:
   build:
