@@ -8,15 +8,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
-import clip
-from torchvision import models, transforms
-from skimage import feature, filters, morphology, measure
-from scipy import ndimage
+from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
+from transformers import CLIPProcessor, CLIPModel
+from scipy.ndimage import gaussian_filter
 import warnings
 
 warnings.filterwarnings("ignore")
 
-app = FastAPI(title="DentaScan UV-AI API")
+app = FastAPI(title="DentaScan UV-AI (CLIPSeg)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,10 +25,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class AnalyzeRequest(BaseModel):
-    image: str  # Base64 encoded image string
-
+    image: str
 
 def base64_to_cv2(base64_string: str) -> np.ndarray:
     if ',' in base64_string:
@@ -41,273 +38,299 @@ def base64_to_cv2(base64_string: str) -> np.ndarray:
         raise ValueError("Invalid image data")
     return img
 
-
 def cv2_to_base64(img: np.ndarray) -> str:
     _, buffer = cv2.imencode('.png', img)
     base64_str = base64.b64encode(buffer).decode('utf-8')
     return f"data:image/png;base64,{base64_str}"
 
-
-class TeethAnalyzer:
+class TeethAnalyzerCLIP:
     def __init__(self):
-        print("Loading AI Models... This may take a moment.")
-        # Device configuration
+        print("Loading Hugging Face Transformers...")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # Load OpenAI CLIP (ViT-L/14)
-        self.clip_model, self.clip_preprocess = clip.load("ViT-L/14", device=self.device)
+        self.seg_processor = CLIPSegProcessor.from_pretrained("CIDAS/clipseg-rd64-refined")
+        self.seg_model     = CLIPSegForImageSegmentation.from_pretrained("CIDAS/clipseg-rd64-refined").to(self.device)
+        self.seg_model.eval()
+        
+        self.clip_model     = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(self.device)
+        self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
         self.clip_model.eval()
-        
-        # Load EfficientNet-B4
-        from torchvision.models import efficientnet_b4, EfficientNet_B4_Weights
-        effnet = efficientnet_b4(weights=EfficientNet_B4_Weights.DEFAULT).to(self.device)
-        effnet.eval()
-        self.feature_extractor = torch.nn.Sequential(*list(effnet.children())[:-1]).to(self.device)
-        self.feature_extractor.eval()
-        self.effnet_transform = transforms.Compose([
-            transforms.Resize((380, 380)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406],
-                                 [0.229, 0.224, 0.225])
-        ])
-        
-        self.DENTAL_PROMPTS = {
-            "healthy":          "UV fluorescence photo of clean healthy teeth with uniform bright white blue glow and no dark spots",
+
+        self.CONDITION_PROMPTS = {
+            "healthy":          "UV fluorescence photo of perfectly healthy teeth with bright uniform blue-white glow and no dark spots",
             "mild_plaque":      "UV fluorescence photo of teeth with mild plaque showing slight dark patches near gumline",
-            "heavy_plaque":     "UV fluorescence photo of teeth with heavy plaque and bacterial buildup showing many dark patches",
-            "caries":           "UV fluorescence photo of teeth with cavities and dental caries showing dark lesions on enamel",
-            "calculus":         "UV fluorescence photo of teeth with tartar and calculus deposits showing yellow green fluorescence",
-            "stained":          "UV fluorescence photo of severely stained or discolored teeth with uneven dark fluorescence",
+            "moderate_plaque":  "UV fluorescence photo of teeth with moderate plaque and several dark patches on surface",
+            "heavy_plaque":     "UV fluorescence photo of teeth with heavy plaque buildup showing many large dark patches",
+            "caries":           "UV fluorescence photo of teeth with dental cavities showing dark lesions and absent fluorescence spots",
+            "calculus":         "UV fluorescence photo of teeth with tartar deposits showing yellowish-green fluorescence",
+            "stained":          "UV fluorescence photo of severely stained discolored teeth with disrupted irregular dark fluorescence",
         }
+        
         print("Models loaded successfully.")
 
-    def preprocess_uv_image(self, img_bgr: np.ndarray):
-        img_resized = cv2.resize(img_bgr, (640, 480))
-        img_rgb     = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-        img_hsv     = cv2.cvtColor(img_resized, cv2.COLOR_BGR2HSV)
-        img_lab     = cv2.cvtColor(img_resized, cv2.COLOR_BGR2LAB)
-        
-        v_channel = img_hsv[:, :, 2]
-        otsu_thresh, bright_mask_otsu = cv2.threshold(
-            v_channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        )
-        lower_uv = np.array([85,  20, 150])
-        upper_uv = np.array([130, 255, 255])
-        uv_color_mask = cv2.inRange(img_hsv, lower_uv, upper_uv)
+    def build_teeth_mask(self, img_bgr, target_w=640, target_h=480):
+        img = cv2.resize(img_bgr, (target_w, target_h))
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        v   = hsv[:, :, 2]
+        H, W = img.shape[:2]
 
-        l_channel = img_lab[:, :, 0]
-        _, l_mask = cv2.threshold(l_channel, 160, 255, cv2.THRESH_BINARY)
+        otsu_t, otsu_mask = cv2.threshold(v, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        rel_t = np.percentile(v, 65)
+        _, rel_mask = cv2.threshold(v, int(rel_t), 255, cv2.THRESH_BINARY)
+        combined = cv2.bitwise_or(otsu_mask, rel_mask)
 
-        combined_mask = cv2.bitwise_or(bright_mask_otsu, uv_color_mask)
-        combined_mask = cv2.bitwise_or(combined_mask, l_mask)
+        spatial = np.zeros((H, W), dtype=np.uint8)
+        spatial[int(H*0.18):int(H*0.82), int(W*0.04):int(W*0.96)] = 255
+        combined = cv2.bitwise_and(combined, spatial)
 
-        kernel     = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-        clean_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
-        clean_mask = cv2.morphologyEx(clean_mask,    cv2.MORPH_OPEN,  kernel, iterations=1)
+        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        k_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, k_close, iterations=3)
+        mask = cv2.morphologyEx(mask,     cv2.MORPH_OPEN,  k_open,  iterations=2)
 
-        teeth_roi = cv2.bitwise_and(img_rgb, img_rgb, mask=clean_mask)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        filtered = np.zeros_like(mask)
+        MIN_AREA = 600
+        candidates = []
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            by   = stats[i, cv2.CC_STAT_TOP]
+            bw   = stats[i, cv2.CC_STAT_WIDTH]
+            bh   = stats[i, cv2.CC_STAT_HEIGHT]
+            aspect = bw / (bh + 1e-6)
+            if area < MIN_AREA: continue
+            if aspect < 0.5:    continue
+            if by > H * 0.78:   continue
+            if bh > H * 0.65:   continue
+            candidates.append((area, i))
 
-        return img_rgb, img_hsv, img_lab, clean_mask, teeth_roi
+        candidates.sort(reverse=True)
+        for _, i in candidates[:6]:
+            filtered[labels == i] = 255
 
-    def analyze_uv_fluorescence(self, img_rgb, mask):
-        mask_bool  = mask > 0
-        roi_pixels = img_rgb[mask_bool]
+        contours, _ = cv2.findContours(filtered, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        final = filtered.copy()
+        if contours:
+            pts = np.vstack(contours)
+            _, _, wb, hb = cv2.boundingRect(pts)
+            if wb / (hb + 1e-6) > 1.1 and wb < W * 0.95:
+                try:
+                    hull      = cv2.convexHull(pts)
+                    hull_mask = np.zeros_like(filtered)
+                    cv2.drawContours(hull_mask, [hull], -1, 255, cv2.FILLED)
+                    kd      = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+                    dilated = cv2.dilate(filtered, kd, iterations=2)
+                    final   = cv2.bitwise_and(hull_mask, dilated)
+                except Exception:
+                    pass
 
-        if len(roi_pixels) == 0:
-            return {
-                "fluorescence_intensity": 0, "blue_dominance_ratio": 0, "red_fluor_ratio": 0,
-                "uniformity_score": 0, "dark_spot_coverage": 0, "whiteness_index": 0, "channel_balance": 0
-            }
+        img_rgb_r = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        roi       = cv2.bitwise_and(img_rgb_r, img_rgb_r, mask=final)
+        return final, roi, img_rgb_r
 
-        r_vals = roi_pixels[:, 0].astype(float)
-        g_vals = roi_pixels[:, 1].astype(float)
-        b_vals = roi_pixels[:, 2].astype(float)
+    def clipseg_refine_mask(self, pil_img, existing_mask):
+        prompts = [
+            "teeth under UV fluorescence light",
+            "white glowing teeth",
+            "dental enamel fluorescence",
+        ]
+        img_352 = pil_img.resize((352, 352))
+        W_orig, H_orig = pil_img.size
 
-        intensity_mean = np.mean(r_vals * 0.299 + g_vals * 0.587 + b_vals * 0.114)
-        intensity_std  = np.std(r_vals * 0.299 + g_vals * 0.587 + b_vals * 0.114)
+        all_heatmaps = []
+        for prompt in prompts:
+            inputs = self.seg_processor(
+                text=[prompt], images=[img_352], return_tensors="pt", padding=True
+            ).to(self.device)
 
-        blue_dom_ratio = np.mean(b_vals) / (np.mean(r_vals) + np.mean(g_vals) + np.mean(b_vals) + 1e-6)
-        red_fluor_ratio = np.mean(r_vals) / (np.mean(b_vals) + 1e-6)
-        uniformity_score = 1.0 - min(intensity_std / 128.0, 1.0)
+            with torch.no_grad():
+                outputs = self.seg_model(**inputs)
 
-        brightness  = r_vals * 0.299 + g_vals * 0.587 + b_vals * 0.114
-        if len(brightness[brightness > 10]) > 0:
-            dark_thresh = np.percentile(brightness[brightness > 10], 15)
+            logits  = outputs.logits[0].squeeze().cpu().numpy()
+            logits  = gaussian_filter(logits, sigma=2)
+            logits  = (logits - logits.min()) / (logits.max() - logits.min() + 1e-8)
+            all_heatmaps.append(logits)
+
+        avg_heatmap = np.mean(all_heatmaps, axis=0)
+        heatmap_resized = cv2.resize(avg_heatmap.astype(np.float32), (W_orig, H_orig))
+
+        heat_thresh = np.percentile(heatmap_resized, 40)
+        seg_mask = (heatmap_resized > heat_thresh).astype(np.uint8) * 255
+
+        if existing_mask is not None:
+            existing_resized = cv2.resize(existing_mask, (W_orig, H_orig))
+            combined = cv2.bitwise_and(seg_mask, existing_resized)
+            if (combined > 0).mean() < 0.005:
+                combined = seg_mask
         else:
-            dark_thresh = 0
-        dark_ratio  = np.mean(brightness < dark_thresh)
+            combined = seg_mask
 
-        whiteness = np.mean(np.minimum(r_vals, np.minimum(g_vals, b_vals))) / 255.0
-        channel_balance = 1.0 - (np.std([np.mean(r_vals), np.mean(g_vals), np.mean(b_vals)]) / 128.0)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, k, iterations=2)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN,  k, iterations=1)
 
-        return {
-            "fluorescence_intensity":   float(intensity_mean),
-            "blue_dominance_ratio":     float(blue_dom_ratio),
-            "red_fluor_ratio":          float(red_fluor_ratio),
-            "uniformity_score":         float(uniformity_score),
-            "dark_spot_coverage":       float(dark_ratio),
-            "whiteness_index":          float(whiteness),
-            "channel_balance":          float(channel_balance),
-        }
+        return combined, heatmap_resized
 
-    def detect_defects(self, img_rgb, mask):
-        annotated = img_rgb.copy()
-        mask_bool = mask > 0
+    def clip_classify_condition(self, pil_img):
+        labels = list(self.CONDITION_PROMPTS.keys())
+        texts  = list(self.CONDITION_PROMPTS.values())
 
-        gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-        gray_masked = gray.copy()
-        gray_masked[~mask_bool] = 255
-
-        # Adaptive threshold
-        dark_regions = cv2.adaptiveThreshold(
-            gray_masked, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 25, 10
-        )
-        dark_regions[~mask_bool] = 0
-
-        kernel_sm = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        dark_clean = cv2.morphologyEx(dark_regions, cv2.MORPH_OPEN, kernel_sm, iterations=2)
-
-        contours_dark, _ = cv2.findContours(dark_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        dark_count = 0
-        for cnt in contours_dark:
-            area = cv2.contourArea(cnt)
-            if area > 80:
-                dark_count += 1
-                cv2.drawContours(annotated, [cnt], -1, (255, 60, 60), 2)
-
-        # Red patches
-        r_ch, g_ch, b_ch = img_rgb[:,:,0], img_rgb[:,:,1], img_rgb[:,:,2]
-        red_dominant = (r_ch.astype(int) - b_ch.astype(int) > 30) & mask_bool
-        red_map      = (red_dominant * 255).astype(np.uint8)
-        red_clean    = cv2.morphologyEx(red_map, cv2.MORPH_OPEN, kernel_sm, iterations=1)
-        contours_red, _ = cv2.findContours(red_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        plaque_patches = sum(1 for c in contours_red if cv2.contourArea(c) > 150)
-
-        for cnt in contours_red:
-            if cv2.contourArea(cnt) > 150:
-                cv2.drawContours(annotated, [cnt], -1, (255, 140, 0), 2)
-
-        # Edges
-        blurred  = cv2.GaussianBlur(gray_masked, (5, 5), 0)
-        edges    = cv2.Canny(blurred, 30, 90)
-        edges[~mask_bool] = 0
-        edge_density = float(np.sum(edges > 0)) / max(np.sum(mask_bool), 1)
-
-        teeth_pixels  = int(np.sum(mask_bool))
-        dark_pixels   = int(np.sum(dark_clean > 0))
-        dark_coverage = float(dark_pixels / max(teeth_pixels, 1))
-        red_coverage  = float(int(np.sum(red_clean > 0)) / max(teeth_pixels, 1))
-
-        defect_metrics = {
-            "dark_spot_count":      dark_count,
-            "dark_area_coverage":   dark_coverage,
-            "plaque_patch_count":   plaque_patches,
-            "red_coverage_ratio":   red_coverage,
-            "edge_density":         edge_density,
-            "teeth_pixel_count":    teeth_pixels,
-        }
-
-        return annotated, dark_clean, red_clean, defect_metrics
-
-    def clip_classify(self, pil_image):
-        labels  = list(self.DENTAL_PROMPTS.keys())
-        texts   = list(self.DENTAL_PROMPTS.values())
-
-        img_tensor   = self.clip_preprocess(pil_image).unsqueeze(0).to(self.device)
-        text_tokens  = clip.tokenize(texts, truncate=True).to(self.device)
+        inputs = self.clip_processor(
+            text=texts, images=pil_img, return_tensors="pt", padding=True, truncation=True
+        ).to(self.device)
 
         with torch.no_grad():
-            img_features  = self.clip_model.encode_image(img_tensor)
-            text_features = self.clip_model.encode_text(text_tokens)
+            outputs       = self.clip_model(**inputs)
+            logits        = outputs.logits_per_image
+            probabilities = logits.softmax(dim=-1)[0].cpu().numpy()
 
-            img_features  = img_features  / img_features.norm(dim=-1, keepdim=True)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            similarity    = (100.0 * img_features @ text_features.T).softmax(dim=-1)
-            probs         = similarity[0].cpu().numpy()
+        return dict(zip(labels, probabilities.tolist()))
 
-        return {k: float(v) for k,v in zip(labels, probs)}
-
-    def compute_health_score(self, uv_params, defect_metrics, clip_scores):
-        scores = {}
-        # Module A
-        intensity_score  = min(uv_params["fluorescence_intensity"] / 200.0, 1.0)
-        blue_score       = min(uv_params["blue_dominance_ratio"] / 0.55, 1.0)
-        red_penalty      = max(0.0, 1.0 - uv_params["red_fluor_ratio"] / 1.5)
-        uniform_score    = uv_params["uniformity_score"]
-        white_score      = uv_params["whiteness_index"]
-
-        uv_score = (intensity_score * 0.25 + blue_score * 0.25 +
-                    red_penalty * 0.20 + uniform_score * 0.15 + white_score * 0.15)
-        scores["UV Fluorescence Quality"] = float(uv_score * 100)
-
-        # Module B
-        dark_pen   = max(0.0, 1.0 - defect_metrics["dark_area_coverage"] * 8)
-        plaque_pen = max(0.0, 1.0 - defect_metrics["red_coverage_ratio"] * 5)
-        spot_pen   = max(0.0, 1.0 - defect_metrics["dark_spot_count"] / 15)
-        edge_pen   = max(0.0, 1.0 - defect_metrics["edge_density"] * 10)
-
-        defect_score = (dark_pen * 0.30 + plaque_pen * 0.30 +
-                        spot_pen * 0.25 + edge_pen * 0.15)
-        scores["Defect-Free Surface"] = float(defect_score * 100)
-
-        # Module C
-        clip_weights = {
-            "healthy":      1.0,
-            "mild_plaque":  0.55,
-            "heavy_plaque": 0.10,
-            "caries":       0.00,
-            "calculus":     0.20,
-            "stained":      0.15,
+    def clip_analyze_uv_params(self, pil_img):
+        param_prompts = {
+            "fluorescence_intensity": {
+                "high":   "teeth with very bright strong fluorescence glow under UV light",
+                "medium": "teeth with moderate average fluorescence glow under UV light",
+                "low":    "teeth with dim weak faint fluorescence under UV light",
+            },
+            "blue_white_uniformity": {
+                "high":   "teeth with perfectly uniform even blue-white fluorescence",
+                "medium": "teeth with somewhat uneven patchy fluorescence",
+                "low":    "teeth with very uneven irregular fluorescence pattern with many dark areas",
+            },
+            "red_orange_areas": {
+                "absent":    "teeth with no red or orange fluorescence areas",
+                "minimal":   "teeth with tiny minimal red orange spots",
+                "present":   "teeth with visible red orange fluorescence patches",
+                "extensive": "teeth with large extensive red orange fluorescence areas",
+            },
+            "dark_lesion_count": {
+                "none": "teeth with no dark spots or lesions under UV",
+                "1-3":  "teeth with one to three small dark spots under UV",
+                "4-7":  "teeth with four to seven dark spots under UV",
+                "8+":   "teeth with many eight or more dark spots under UV",
+            },
         }
-        clip_score = sum(clip_scores[k] * w for k, w in clip_weights.items())
-        scores["AI Visual Assessment"] = float(clip_score * 100)
 
-        overall = (scores["UV Fluorescence Quality"] * 0.40 +
-                   scores["Defect-Free Surface"]     * 0.35 +
-                   scores["AI Visual Assessment"]    * 0.25)
-        scores["Overall Health Score"] = float(overall)
+        results = {}
+        for param, options in param_prompts.items():
+            option_labels = list(options.keys())
+            option_texts  = list(options.values())
+            inputs = self.clip_processor(
+                text=option_texts, images=pil_img, return_tensors="pt", padding=True, truncation=True
+            ).to(self.device)
+            with torch.no_grad():
+                out   = self.clip_model(**inputs)
+                probs = out.logits_per_image.softmax(dim=-1)[0].cpu().numpy()
+            best = option_labels[int(np.argmax(probs))]
+            results[param] = best
 
-        if   overall >= 80: grade = "Excellent"
-        elif overall >= 65: grade = "Good"
-        elif overall >= 50: grade = "Fair"
-        elif overall >= 35: grade = "Poor"
-        else:               grade = "Critical"
+        return results
 
-        return scores, grade
+    def scores_from_condition(self, condition, uv_params):
+        base_scores = {
+            "healthy": 90, "mild_plaque": 72, "moderate_plaque": 55,
+            "heavy_plaque": 38, "caries": 28, "calculus": 35, "stained": 45,
+        }
+        score = base_scores.get(condition, 60)
+
+        intensity_adj = {"high": +5, "medium": 0, "low": -8}
+        uniformity_adj = {"high": +5, "medium": 0, "low": -8}
+        lesion_adj = {"none": +5, "1-3": -3, "4-7": -10, "8+": -18}
+        red_adj = {"absent": +3, "minimal": 0, "present": -5, "extensive": -12}
+
+        score += intensity_adj.get(uv_params.get("fluorescence_intensity", "medium"), 0)
+        score += uniformity_adj.get(uv_params.get("blue_white_uniformity", "medium"), 0)
+        score += lesion_adj.get(uv_params.get("dark_lesion_count", "none"), 0)
+        score += red_adj.get(uv_params.get("red_orange_areas", "absent"), 0)
+
+        return int(np.clip(score, 0, 100))
 
     def analyze(self, img_bgr: np.ndarray):
-        img_rgb, img_hsv, img_lab, clean_mask, teeth_roi = self.preprocess_uv_image(img_bgr)
+        final_mask, teeth_roi, img_resized_rgb = self.build_teeth_mask(img_bgr)
         
-        uv_params = self.analyze_uv_fluorescence(img_rgb, clean_mask)
-        annotated_img, dark_map, red_map, defect_metrics = self.detect_defects(img_rgb, clean_mask)
+        img_pil_resized = Image.fromarray(img_resized_rgb)
+        refined_mask, heatmap = self.clipseg_refine_mask(img_pil_resized, final_mask)
         
-        # CLIP predictions (Avg of full and ROI)
-        img_pil = Image.fromarray(img_rgb)
-        img_roi_pil = Image.fromarray(teeth_roi)
-        results_full = self.clip_classify(img_pil)
-        results_roi  = self.clip_classify(img_roi_pil)
-        clip_scores = {k: (results_full[k] + results_roi[k]) / 2 for k in results_full}
-        top_condition = max(clip_scores, key=clip_scores.get)
+        teeth_roi_refined = cv2.bitwise_and(
+            img_resized_rgb, img_resized_rgb, mask=refined_mask
+        )
         
-        health_scores, grade_label = self.compute_health_score(uv_params, defect_metrics, clip_scores)
+        coords = cv2.findNonZero(refined_mask)
+        if coords is not None:
+            xb, yb, wb, hb = cv2.boundingRect(coords)
+            pad = 12
+            crop = teeth_roi_refined[
+                max(0, yb-pad):min(teeth_roi_refined.shape[0], yb+hb+pad),
+                max(0, xb-pad):min(teeth_roi_refined.shape[1], xb+wb+pad)
+            ]
+            crop_pil = Image.fromarray(crop)
+        else:
+            crop_pil = Image.fromarray(teeth_roi_refined)
+
+        clip_input_pil = crop_pil.resize((224, 224), Image.LANCZOS)
         
-        metrics = {
-            "uv": uv_params,
-            "defect": defect_metrics,
-            "clip": clip_scores,
-            "scores": health_scores
+        condition_scores = self.clip_classify_condition(clip_input_pil)
+        top_condition    = max(condition_scores, key=condition_scores.get)
+        top_confidence   = condition_scores[top_condition]
+        
+        uv_params = self.clip_analyze_uv_params(clip_input_pil)
+        health_score = self.scores_from_condition(top_condition, uv_params)
+
+        gemini_analysis = {
+            "overall_condition": top_condition,
+            "health_score":      health_score,
+            "confidence":        round(float(top_confidence), 2),
+            "findings": {
+                "plaque_detected":         top_condition not in ["healthy"],
+                "plaque_severity":         "none" if top_condition == "healthy"
+                                           else "mild" if "mild" in top_condition
+                                           else "moderate" if "moderate" in top_condition
+                                           else "severe" if "heavy" in top_condition else "mild",
+                "plaque_location":         "gumline area" if "plaque" in top_condition else "none detected",
+                "caries_detected":         top_condition == "caries",
+                "caries_locations":        "dark lesions on enamel" if top_condition == "caries" else "none detected",
+                "calculus_detected":       top_condition == "calculus",
+                "fluorescence_uniformity": uv_params.get("blue_white_uniformity", "medium"),
+                "dark_spot_coverage":      {"none":"<5%","1-3":"5-15%","4-7":"15-30%","8+":"30%+"}.get(
+                                                uv_params.get("dark_lesion_count","none"), "5-10%"),
+                "upper_teeth_condition":   "healthy" if health_score >= 75 else
+                                           "mild_issues" if health_score >= 55 else "moderate_issues",
+                "lower_teeth_condition":   "healthy" if health_score >= 75 else
+                                           "mild_issues" if health_score >= 55 else "moderate_issues",
+            },
+            "uv_parameters": uv_params,
+            "recommendations": [
+                "Schedule a professional dental cleaning within 6 months" if health_score >= 70
+                    else "Schedule an urgent dental appointment for professional cleaning",
+                "Maintain twice-daily brushing with fluoride toothpaste and daily flossing",
+                "Use UV fluorescence monitoring every 3 months to track plaque progression",
+            ],
+            "summary": (
+                f"UV analysis indicates {top_condition.replace('_',' ')} with a health score of "
+                f"{health_score}/100. Fluorescence intensity is {uv_params.get('fluorescence_intensity','moderate')} "
+                f"with {uv_params.get('blue_white_uniformity','medium')} uniformity across the dental surface."
+            ),
         }
+
+        # Visualization logic
+        overlay = img_resized_rgb.copy()
+        green   = np.zeros_like(img_resized_rgb)
+        green[refined_mask > 0] = [0, 220, 120]
+        detected_img = cv2.addWeighted(overlay, 0.72, green, 0.28, 0)
         
-        return health_scores["Overall Health Score"], grade_label, top_condition.replace("_", " ").title(), metrics, clean_mask, annotated_img
+        # Color mapped heatmap
+        heatmap_colored = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
+
+        return gemini_analysis, img_resized_rgb, detected_img, heatmap_colored
 
 try:
-    analyzer = TeethAnalyzer()
+    analyzer = TeethAnalyzerCLIP()
 except Exception as e:
     print(f"Failed to initialize model: {e}")
+    import traceback
+    traceback.print_exc()
     analyzer = None
-
 
 @app.post("/analyze")
 async def analyze_endpoint(request: AnalyzeRequest):
@@ -315,27 +338,15 @@ async def analyze_endpoint(request: AnalyzeRequest):
         raise HTTPException(status_code=500, detail="Models are not initialized.")
     try:
         img_bgr = base64_to_cv2(request.image)
-        overall, grade, top_prediction, metrics, masked_img, defect_map = analyzer.analyze(img_bgr)
+        gemini_analysis, img_resized, detected_img, heatmap_colored = analyzer.analyze(img_bgr)
         
-        # Original Image from resized BGR
-        img_resized = cv2.resize(img_bgr, (640, 480))
-        b64_orig = cv2_to_base64(img_resized)
-        
-        # Scale back the mask to visually fit if needed (just visualizing the mask)
-        # Using a colormap for mask to match "Blues" logic conceptually
-        colored_mask = cv2.applyColorMap(masked_img, cv2.COLORMAP_WINTER)
-        b64_masked = cv2_to_base64(colored_mask)
-        
-        # Defect map is RGB in Colab, convert to BGR for saving
-        defect_bgr = cv2.cvtColor(defect_map, cv2.COLOR_RGB2BGR)
-        b64_defect = cv2_to_base64(defect_bgr)
+        b64_orig    = cv2_to_base64(cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR))
+        b64_masked  = cv2_to_base64(cv2.cvtColor(detected_img, cv2.COLOR_RGB2BGR))
+        b64_heatmap = cv2_to_base64(heatmap_colored)
         
         return {
-            "overall_score": overall,
-            "grade": grade,
-            "top_prediction": top_prediction,
-            "metrics": metrics,
-            "processed_images": [b64_orig, b64_masked, b64_defect]
+            "analysis": gemini_analysis,
+            "processed_images": [b64_orig, b64_masked, b64_heatmap]
         }
     except Exception as e:
         import traceback
@@ -344,3 +355,4 @@ async def analyze_endpoint(request: AnalyzeRequest):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

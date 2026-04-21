@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Upload, AlertCircle, Activity, Shield, AlertTriangle, ShieldCheck, Microscope, DatabaseZap } from 'lucide-react';
+import { Upload, AlertCircle, Activity, Shield, AlertTriangle, ShieldCheck, Microscope, DatabaseZap, CheckCircle2, Info } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 
 export default function App() {
@@ -81,8 +81,8 @@ export default function App() {
         <h3 className="text-gray-400 font-medium text-sm tracking-wider uppercase">{title}</h3>
       </div>
       <div className="mt-auto">
-        <div className="text-3xl font-bold text-gray-100 mb-1">{value}</div>
-        <div className="text-sm text-gray-500">{subtitle}</div>
+        <div className="text-3xl font-bold text-gray-100 mb-1 capitalize">{value}</div>
+        <div className="text-sm text-gray-500 capitalize">{subtitle}</div>
       </div>
     </div>
   );
@@ -102,7 +102,7 @@ export default function App() {
                 DentaScan <span className="text-primary bg-clip-text text-transparent bg-gradient-to-r from-primary to-blue-400">UV-AI</span>
               </h1>
             </div>
-            <p className="text-gray-400 mt-2 text-lg">Advanced UV Fluorescence Dental Diagnostics via Google Colab Pipeline</p>
+            <p className="text-gray-400 mt-2 text-lg">CLIP-based Architecture Image Diagnostics</p>
           </div>
           {results && (
             <button 
@@ -197,15 +197,15 @@ export default function App() {
                 <li className="flex gap-4">
                   <div className="w-8 h-8 rounded-full bg-surface border border-gray-700 flex items-center justify-center font-mono text-sm shrink-0">2</div>
                   <div>
-                    <strong className="text-gray-200 block mb-1">OpenAI CLIP ViT-L/14</strong>
+                    <strong className="text-gray-200 block mb-1">CLIP Zero-Shot</strong>
                     Zero-shot visual classification for clinical disease indicators.
                   </div>
                 </li>
                 <li className="flex gap-4">
                   <div className="w-8 h-8 rounded-full bg-surface border border-gray-700 flex items-center justify-center font-mono text-sm shrink-0">3</div>
                   <div>
-                    <strong className="text-gray-200 block mb-1">Defect Mapping</strong>
-                    Adaptive spatial thresholding identifying caries and fractures.
+                    <strong className="text-gray-200 block mb-1">CLIPSeg Refinement</strong>
+                    Transformer-driven segmentation heatmaps isolating pathology.
                   </div>
                 </li>
               </ul>
@@ -213,6 +213,15 @@ export default function App() {
           </div>
         ) : (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
+            
+            {/* Summary Panel */}
+            <div className="glass-panel p-6 border-l-4 border-l-primary flex items-start gap-4">
+                <Info className="text-primary mt-1 shrink-0" size={24} />
+                <p className="text-gray-300 leading-relaxed text-lg italic">
+                  &ldquo;{results.analysis.summary}&rdquo;
+                </p>
+            </div>
+
             {/* Results Header / Gauge */}
             <div className="grid md:grid-cols-3 gap-6">
               <div className="glass-panel p-6 sm:p-8 md:col-span-1 flex flex-col items-center justify-between relative">
@@ -223,8 +232,8 @@ export default function App() {
                       <PieChart>
                         <Pie
                           data={[
-                            { value: results.overall_score },
-                            { value: 100 - results.overall_score }
+                            { value: results.analysis.health_score },
+                            { value: 100 - results.analysis.health_score }
                           ]}
                           cx="50%"
                           cy="100%"
@@ -235,15 +244,15 @@ export default function App() {
                           dataKey="value"
                           stroke="none"
                         >
-                          <Cell fill={getGaugeColor(results.overall_score)} />
+                          <Cell fill={getGaugeColor(results.analysis.health_score)} />
                           <Cell fill="#1f2937" />
                         </Pie>
                       </PieChart>
                     </ResponsiveContainer>
                   </div>
                   <div className="relative z-20 flex flex-col items-center justify-end pb-1 lg:pb-2">
-                    <span className="text-3xl sm:text-4xl font-black tabular-nums tracking-tight leading-none drop-shadow-sm" style={{ color: getGaugeColor(results.overall_score) }}>
-                      {results.overall_score.toFixed(1)}
+                    <span className="text-3xl sm:text-4xl font-black tabular-nums tracking-tight leading-none drop-shadow-sm" style={{ color: getGaugeColor(results.analysis.health_score) }}>
+                      {results.analysis.health_score}
                     </span>
                     <span className="text-[9px] sm:text-[10px] uppercase font-bold text-gray-500 tracking-widest mt-0.5">out of 100</span>
                   </div>
@@ -251,31 +260,34 @@ export default function App() {
               </div>
 
               <div className="glass-panel p-6 sm:p-8 md:col-span-2 flex flex-col justify-center relative overflow-hidden">
-                <div className={`absolute right-0 top-0 w-64 h-64 -translate-y-1/4 translate-x-1/4 rounded-full blur-3xl opacity-10 pointer-events-none`} style={{ backgroundColor: getGaugeColor(results.overall_score) }} />
+                <div className={`absolute right-0 top-0 w-64 h-64 -translate-y-1/4 translate-x-1/4 rounded-full blur-3xl opacity-10 pointer-events-none`} style={{ backgroundColor: getGaugeColor(results.analysis.health_score) }} />
                 
                 <h3 className="text-sm font-bold text-gray-500 uppercase tracking-widest mb-4">AI Diagnostic Verdict</h3>
                 <div className="flex flex-col sm:flex-row sm:items-end gap-x-6 gap-y-4">
-                  <span className="text-6xl font-black tracking-tight" style={{ color: getGaugeColor(results.overall_score) }}>
-                    {results.grade}
+                  <span className="text-5xl font-black tracking-tight" style={{ color: getGaugeColor(results.analysis.health_score) }}>
+                    {(results.analysis.health_score >= 80) ? 'Excellent (A)' : 
+                     (results.analysis.health_score >= 65) ? 'Good (B)' : 
+                     (results.analysis.health_score >= 50) ? 'Fair (C)' : 
+                     (results.analysis.health_score >= 35) ? 'Poor (D)' : 'Critical (F)'}
                   </span>
                   <div className="pb-1.5 flex items-center gap-2 text-xl font-medium text-gray-300 bg-surface/50 px-4 py-2 rounded-lg border border-gray-700/50">
                     <ShieldCheck size={24} className="text-primary" />
-                    Classification: <span className="text-white">{results.top_prediction}</span>
+                    Classification: <span className="text-white capitalize">{results.analysis.overall_condition.replace('_', ' ')}</span>
                   </div>
                 </div>
                 
                 <div className="mt-8 grid grid-cols-3 gap-4 text-sm">
                   <div>
-                    <span className="text-gray-500 block text-xs uppercase mb-1">UV Fluor</span>
-                    <strong className="text-gray-200">{results.metrics.scores["UV Fluorescence Quality"]?.toFixed(1)} / 40%</strong>
+                    <span className="text-gray-500 block text-xs uppercase mb-1">Confidence</span>
+                    <strong className="text-gray-200">{(results.analysis.confidence * 100).toFixed(1)}%</strong>
                   </div>
                   <div>
-                    <span className="text-gray-500 block text-xs uppercase mb-1">Surface Integrity</span>
-                    <strong className="text-gray-200">{results.metrics.scores["Defect-Free Surface"]?.toFixed(1)} / 35%</strong>
+                    <span className="text-gray-500 block text-xs uppercase mb-1">Caries Detected</span>
+                    <strong className="text-gray-200">{results.analysis.findings.caries_detected ? 'Yes ⚠️' : 'No ✅'}</strong>
                   </div>
                   <div>
-                    <span className="text-gray-500 block text-xs uppercase mb-1">AI Visual</span>
-                    <strong className="text-gray-200">{results.metrics.scores["AI Visual Assessment"]?.toFixed(1)} / 25%</strong>
+                    <span className="text-gray-500 block text-xs uppercase mb-1">Calculus Detected</span>
+                    <strong className="text-gray-200">{results.analysis.findings.calculus_detected ? 'Yes ⚠️' : 'No ✅'}</strong>
                   </div>
                 </div>
               </div>
@@ -284,99 +296,121 @@ export default function App() {
             {/* Metrics Grid */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
               <MetricCard 
-                title="Enamel Uniformity" 
-                value={(results.metrics.uv.uniformity_score * 100).toFixed(1) + '%'} 
+                title="UV Intensity" 
+                value={results.analysis.uv_parameters.fluorescence_intensity} 
                 subtitle="Calculated Optics" 
                 icon={Activity} 
                 colorClass="text-blue-400" 
               />
               <MetricCard 
-                title="Plaque Patches" 
-                value={results.metrics.defect.plaque_patch_count} 
-                subtitle="Red Fluor Dominance" 
+                title="Plaque Severity" 
+                value={results.analysis.findings.plaque_severity} 
+                subtitle={results.analysis.findings.plaque_location} 
                 icon={AlertTriangle} 
                 colorClass="text-warning" 
               />
               <MetricCard 
-                title="Whiteness Index" 
-                value={(results.metrics.uv.whiteness_index * 100).toFixed(1) + '%'} 
+                title="UV Uniformity" 
+                value={results.analysis.uv_parameters.blue_white_uniformity} 
                 subtitle="Surface Normalization" 
                 icon={Shield} 
                 colorClass="text-primary" 
               />
               <MetricCard 
                 title="Dark Lesions" 
-                value={results.metrics.defect.dark_spot_count} 
-                subtitle="Abs. Carious Entities" 
+                value={results.analysis.uv_parameters.dark_lesion_count} 
+                subtitle="Carious Entities" 
                 icon={AlertCircle} 
                 colorClass="text-danger" 
               />
             </div>
 
-            {/* Visualizer & Detail Table */}
+            {/* Visualizer & Recommendations */}
             <div className="grid lg:grid-cols-2 gap-6">
               <div className="glass-panel p-6 flex flex-col h-full bg-[#161b22]">
                 <h3 className="text-xl font-bold flex items-center gap-2 mb-6">
-                  Extracted Parameters Table
+                  Clinical Recommendations
                 </h3>
-                <div className="bg-[#0d1117] rounded-lg border border-gray-700/50 overflow-hidden flex-grow">
-                  <table className="w-full text-sm text-left text-gray-400">
-                    <tbody>
-                      <tr className="border-b border-gray-700/50 bg-[#1c2128]">
-                        <td className="px-4 py-3 font-medium text-gray-200">Fluorescence Intensity</td>
-                        <td className="px-4 py-3 text-right">{results.metrics.uv.fluorescence_intensity.toFixed(2)}</td>
-                      </tr>
-                      <tr className="border-b border-gray-700/50">
-                        <td className="px-4 py-3 font-medium text-gray-200">Blue Dominance</td>
-                        <td className="px-4 py-3 text-right">{(results.metrics.uv.blue_dominance_ratio * 100).toFixed(2)}%</td>
-                      </tr>
-                      <tr className="border-b border-gray-700/50 bg-[#1c2128]">
-                        <td className="px-4 py-3 font-medium text-gray-200">Red Fluor Ratio</td>
-                        <td className="px-4 py-3 text-right">{(results.metrics.uv.red_fluor_ratio * 100).toFixed(2)}%</td>
-                      </tr>
-                      <tr className="border-b border-gray-700/50">
-                        <td className="px-4 py-3 font-medium text-gray-200">Dark Spot Coverage</td>
-                        <td className="px-4 py-3 text-right">{(results.metrics.defect.dark_area_coverage * 100).toFixed(3)}%</td>
-                      </tr>
-                      <tr className="border-b border-gray-700/50 bg-[#1c2128]">
-                        <td className="px-4 py-3 font-medium text-gray-200">Red Coverage Ratio</td>
-                        <td className="px-4 py-3 text-right">{(results.metrics.defect.red_coverage_ratio * 100).toFixed(3)}%</td>
-                      </tr>
-                      <tr className="border-b border-gray-700/50">
-                        <td className="px-4 py-3 font-medium text-gray-200">Edge Density</td>
-                        <td className="px-4 py-3 text-right">{(results.metrics.defect.edge_density * 100).toFixed(3)}%</td>
-                      </tr>
-                      <tr className="bg-[#1c2128]">
-                        <td className="px-4 py-3 font-medium text-gray-200">Channel Balance</td>
-                        <td className="px-4 py-3 text-right">{(results.metrics.uv.channel_balance * 100).toFixed(2)}%</td>
-                      </tr>
-                    </tbody>
-                  </table>
+                <div className="flex flex-col gap-4">
+                  {results.analysis.recommendations.map((rec, i) => (
+                    <div key={i} className="flex gap-4 p-4 rounded-xl bg-[#0d1117] border border-gray-700/50">
+                        <CheckCircle2 className="text-primary shrink-0 mt-0.5" size={20} />
+                        <span className="text-gray-300">{rec}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
 
               <div className="glass-panel p-6">
-                <div className="flex items-center justify-between mb-6">
-                  <h3 className="text-xl font-bold flex items-center gap-2">
-                    Spatial Defect Localizer
-                  </h3>
-                  <div className="flex flex-col gap-1 text-xs font-medium bg-surface/50 p-2 rounded-lg border border-gray-700/50">
-                    <div className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-red-400"></span> Edge Canny (Potential Decay)</div>
-                    <div className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-orange-400"></span> Plaque Accumulation</div>
-                  </div>
-                </div>
-                <div className="grid sm:grid-cols-2 gap-4 relative">
+                <div className="grid sm:grid-cols-2 gap-6 h-full">
                   <div className="flex flex-col">
-                    <div className="bg-surface p-2 rounded-t-lg border border-b-0 border-gray-700/50 text-center text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
-                      Original UV Source
-                    </div>
-                    <img src={results.processed_images[0]} alt="Original Map" className="w-full h-auto rounded-b-lg border border-gray-700/50 object-cover bg-black/50 aspect-square" />
-                  </div>
-                  <div className="flex flex-col">
+                    <h3 className="text-xl font-bold flex items-center gap-2 mb-6">
+                      Isolated ROI
+                    </h3>
                     <div className="bg-surface p-2 rounded-t-lg border border-b-0 border-gray-700/50 text-center text-[10px] font-semibold text-primary uppercase tracking-widest bg-primary/5">
-                      AI Annotated Mapping
+                      Masked Selection
                     </div>
-                    <img src={results.processed_images[2]} alt="Defect Map" className="w-full h-auto rounded-b-lg border border-primary/30 object-cover bg-black/50 aspect-square shadow-[0_0_30px_rgba(88,166,255,0.1)]" />
+                    <img src={results.processed_images[1]} alt="Masked Model Input" className="w-full h-auto rounded-b-lg border border-gray-700/50 object-cover bg-black/50 aspect-square" />
+                  </div>
+
+                  <div className="flex flex-col h-full">
+                    <h3 className="text-xl font-bold flex items-center gap-2 mb-6">
+                      Condition Breakdown
+                    </h3>
+                    <div className="flex flex-col gap-4 justify-center h-full pb-2">
+                      {(() => {
+                        const sev = (val) => {
+                          if (typeof val === 'boolean') return !val ? 100 : 20;
+                          const v = String(val).toLowerCase();
+                          if (v.includes("none") || v.includes("absent")) return 100;
+                          if (v.includes("high") || v.includes("healthy")) return 90;
+                          if (v.includes("minimal")) return 78;
+                          if (v.includes("medium")) return 65;
+                          if (v.includes("mild_issues")) return 55;
+                          if (v.includes("mild")) return 60;
+                          if (v.includes("moderate_issues") || v.includes("moderate")) return 38;
+                          if (v.includes("low")) return 30;
+                          if (v.includes("present")) return 22;
+                          if (v.includes("severe")) return 10;
+                          if (v.includes("extensive")) return 5;
+                          if (v.includes("1-3")) return 60;
+                          if (v.includes("4-7")) return 30;
+                          if (v.includes("8+")) return 10;
+                          return 50;
+                        };
+
+                        const plaqueScore = sev(results.analysis.findings.plaque_severity);
+                        const cariesScore = results.analysis.findings.caries_detected ? 20 : 100;
+                        const calcScore = results.analysis.findings.calculus_detected ? 30 : 100;
+                        const uvScore = sev(results.analysis.findings.fluorescence_uniformity);
+                        const healthScore = results.analysis.health_score;
+
+                        const getColor = (s) => s >= 70 ? 'bg-[#2ecc71]' : s >= 40 ? 'bg-[#f39c12]' : 'bg-[#e74c3c]';
+
+                        const renderBar = (label, score) => (
+                          <div key={label} className="flex flex-col gap-1.5">
+                            <div className="flex justify-between text-[10px] text-gray-400 font-bold uppercase tracking-widest">
+                              <span>{label}</span>
+                              <span className="text-gray-300">{score}/100</span>
+                            </div>
+                            <div className="h-2 w-full bg-[#1c2128] rounded-full overflow-hidden border border-gray-700/50">
+                              <div className={`h-full ${getColor(score)} transition-all duration-1000 shadow-[0_0_10px_currentColor]`} style={{ width: `${score}%`, opacity: 0.85 }}></div>
+                            </div>
+                          </div>
+                        );
+
+                        return (
+                          <>
+                            {renderBar("Plaque Absence", plaqueScore)}
+                            {renderBar("Caries Absence", cariesScore)}
+                            {renderBar("Calculus Absence", calcScore)}
+                            {renderBar("UV Uniformity", uvScore)}
+                            <div className="my-1 border-t border-gray-700/50"></div>
+                            {renderBar("Overall Composite", healthScore)}
+                          </>
+                        );
+                      })()}
+                    </div>
                   </div>
                 </div>
               </div>
